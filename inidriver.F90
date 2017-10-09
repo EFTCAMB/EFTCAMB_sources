@@ -216,6 +216,21 @@
     P%yhe    = Ini_Read_Double('helium_fraction',0.24_dl)
     P%Num_Nu_massless  = Ini_Read_Double('massless_neutrinos')
 
+    ! EFTCAMB MOD START: read and allocate EFTCAMB
+    ! read the EFTCAMB model selection flags:
+    call P%EFTCAMB%EFTCAMB_init_from_file( DefIni )
+    if ( P%EFTCAMB%EFTFlag /= 0 ) then
+        ! print the EFTCAMB header:
+        call P%EFTCAMB%EFTCAMB_print_header()
+        ! initialize the output root name:
+        P%EFTCAMB%outroot = TRIM( outroot )
+        ! initialize the model from file:
+        call P%EFTCAMB%EFTCAMB_init_model_from_file( DefIni )
+        ! print feedback:
+        call P%EFTCAMB%EFTCAMB_print_model_feedback()
+    end if
+    ! EFTCAMB MOD END.
+
     P%Nu_mass_eigenstates = Ini_Read_Int('nu_mass_eigenstates',1)
     if (P%Nu_mass_eigenstates > max_nu) error stop 'too many mass eigenstates'
 
@@ -408,7 +423,16 @@
 
     P%MassiveNuMethod  = Ini_Read_Int('massive_nu_approx',Nu_best)
 
+    ! EFTCAMB MOD START: suppress parallelization in debug
+#ifdef DEBUG
+    ! set serial execution, problems creating the files otherwise.
+    ThreadNum      = 1
+#else
+    ! normal operations:
     ThreadNum      = Ini_Read_Int('number_of_threads',ThreadNum)
+#endif
+    ! EFTCAMB MOD END.
+
     use_spline_template = Ini_Read_Logical('use_spline_template',use_spline_template)
 
     if (do_bispectrum) then

@@ -143,6 +143,14 @@
     use Errors
     use RedshiftSpaceData
 
+    ! EFTCAMB MOD START: add the main EFTCAMB object to CAMBParams
+    use EFT_def
+    use EFTCAMB_cache
+    use EFTCAMB_stability
+    use EFTCAMB_ReturnToGR
+    use EFTCAMB_main
+    ! EFTCAMB MOD END.
+
     implicit none
     public
 
@@ -229,6 +237,11 @@
         real(dl)  :: Nu_mass_degeneracies(max_nu)
         real(dl)  :: Nu_mass_fractions(max_nu) !The ratios of the total densities
         integer   :: Nu_mass_numbers(max_nu) !physical number per eigenstate
+
+        ! EFTCAMB MOD START: add the main EFTCAMB object to CAMBParams
+        type(EFTCAMB)                 :: EFTCAMB
+        type(EFTCAMB_parameter_cache) :: eft_par_cache
+        ! EFTCAMB MOD END.
 
         integer   :: Scalar_initial_condition
         !must be one of the initial_xxx values defined in GaugeInterface
@@ -380,6 +393,12 @@
     real(dl) eta_k
     !Constants in SI units
 
+    ! EFTCAMB MOD START: add things for EFTCAMB initialization
+    real(dl) :: RGR_time
+    logical  :: success
+    real(dl) :: k_max
+    ! EFTCAMB MOD END.
+
     global_error_flag = 0
 
     if ((P%WantTensors .or. P%WantVectors).and. P%WantTransfer .and. .not. P%WantScalars) then
@@ -503,7 +522,81 @@
     fHe = CP%YHe/(mass_ratio_He_H*(1.d0-CP%YHe))  !n_He_tot / n_H_tot
 
     if (.not.call_again) then
+
+        ! EFTCAMB MOD START: clean up the EFTCAMB parameter cache
+        if ( CP%EFTCAMB%EFTFlag /= 0 ) then
+            call CP%eft_par_cache%initialize()
+        end if
+        ! EFTCAMB MOD END.
+
         call init_massive_nu(CP%omegan /=0)
+
+        ! EFTCAMB MOD START: initialize the EFTCAMB parameter choice
+        if ( CP%EFTCAMB%EFTFlag /= 0 ) then
+
+            ! 1) parameter cache:
+            !    - relative densities:
+            CP%eft_par_cache%omegac      = CP%omegac
+            CP%eft_par_cache%omegab      = CP%omegab
+            CP%eft_par_cache%omegav      = CP%omegav
+            CP%eft_par_cache%omegak      = CP%omegak
+            CP%eft_par_cache%omegan      = CP%omegan
+            CP%eft_par_cache%omegag      = grhog/grhom
+            CP%eft_par_cache%omegar      = grhornomass/grhom
+            !    - Hubble constant:
+            CP%eft_par_cache%h0          = CP%h0
+            CP%eft_par_cache%h0_Mpc      = CP%h0/c*1000._dl
+            !    - densities:
+            CP%eft_par_cache%grhog       = grhog
+            CP%eft_par_cache%grhornomass = grhornomass
+            CP%eft_par_cache%grhoc       = grhoc
+            CP%eft_par_cache%grhob       = grhob
+            CP%eft_par_cache%grhov       = grhov
+            CP%eft_par_cache%grhok       = grhok
+            !    - massive neutrinos:
+            CP%eft_par_cache%Num_Nu_Massive       = CP%Num_Nu_Massive
+            CP%eft_par_cache%Nu_mass_eigenstates  = CP%Nu_mass_eigenstates
+            allocate( CP%eft_par_cache%grhormass(max_nu), CP%eft_par_cache%nu_masses(max_nu) )
+            CP%eft_par_cache%grhormass            = grhormass
+            CP%eft_par_cache%nu_masses            = nu_masses
+            ! 2) now run background initialization:
+            call CP%EFTCAMB%model%initialize_background( CP%eft_par_cache, CP%EFTCAMB%EFTCAMB_feedback_level, success )
+            if ( .not. success ) then
+                global_error_flag         = 1
+                global_error_message      = 'EFTCAMB: background solver failed'
+                if (present(error)) error = global_error_flag
+                ! 5) final feedback:
+                if ( CP%EFTCAMB%EFTCAMB_feedback_level > 1 ) then
+                    write(*,'(a)') '***************************************************************'
+                end if
+                return
+            end if
+
+            ! 3) compute the return to GR of the theory:
+            call EFTCAMBReturnToGR( CP%EFTCAMB%model, CP%eft_par_cache, CP%EFTCAMB%EFTCAMB_turn_on_time, RGR_time )
+            CP%EFTCAMB%EFTCAMB_turn_on_time = RGR_time
+            call EFTCAMBReturnToGR_feedback( CP%EFTCAMB%EFTCAMB_feedback_level, CP%EFTCAMB%model, CP%eft_par_cache, RGR_time )
+            ! 4) compute wether the theory is stable or not:
+            k_max = 10._dl
+            call EFTCAMB_Stability_Check( success, CP%EFTCAMB, CP%eft_par_cache, EFTstabilitycutoff, 1._dl, k_max )
+            if ( .not. success ) then
+                global_error_flag         = 1
+                global_error_message      = 'EFTCAMB: theory unstable'
+                if (present(error)) error = global_error_flag
+                ! 5) final feedback:
+                if ( CP%EFTCAMB%EFTCAMB_feedback_level > 1 ) then
+                    write(*,'(a)') '***************************************************************'
+                end if
+                return
+            end if
+
+            ! 5) final feedback:
+            if ( CP%EFTCAMB%EFTCAMB_feedback_level > 1 ) then
+                write(*,'(a)') '***************************************************************'
+            end if
+        end if
+        ! EFTCAMB MOD END.
+
         call init_background
         if (global_error_flag==0) then
             CP%tau0=TimeOfz(0._dl)
@@ -1561,7 +1654,7 @@
 
 
     !ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
-    module MassiveNu
+module MassiveNu
     use precision
     use ModelParams
     implicit none
@@ -1574,6 +1667,9 @@
     real(dl), parameter  :: zeta5  = 1.0369277551433699263313_dl
     real(dl), parameter  :: zeta7  = 1.0083492773819228268397_dl
 
+    ! zeta3*3/2/pi^2*4/11*((k_B*COBE_CMBTemp/hbar/c)^3* 8*pi*G/3/(100*km/s/megaparsec)^2/(c^2/eV)
+    real(dl), parameter :: neutrino_mass_fac= 94.07_dl !converts omnuh2 into sum m_nu in eV
+
     integer, parameter  :: nrhopn=2000
     real(dl), parameter :: am_min = 0.01_dl  !0.02_dl
     !smallest a*m_nu to integrate distribution function rather than using series
@@ -1585,7 +1681,11 @@
 
     real(dl) dlnam
 
-    real(dl), dimension(:), allocatable ::  r1,p1,dr1,dp1,ddr1
+    ! EFTCAMB MOD START: compatibility with massive neutrinos
+    real(dl), dimension(:), allocatable ::  r1,p1,dr1,dp1,ddr1, ddp1, dddp1, ddddp1
+    ! Original code:
+    ! real(dl), dimension(:), allocatable ::  r1,p1,dr1,dp1,ddr1
+    ! EFTCAMB MOD END.
 
     !Sample for massive neutrino momentum
     !These settings appear to be OK for P_k accuate at 1e-3 level
@@ -1594,10 +1694,31 @@
 
     integer nqmax !actual number of q modes evolves
 
+    ! EFTCAMB MOD START: compatibility with massive neutrinos
     public const,Nu_Init,Nu_background, Nu_rho, Nu_drho,  nqmax0, nqmax, &
-        nu_int_kernel, nu_q
+    	nu_int_kernel, nu_q, sum_mnu_for_m1, neutrino_mass_fac, Nu_pidot, Nu_pidotdot, Nu_pidotdotdot
+    ! Original code:
+    ! public const,Nu_Init,Nu_background, Nu_rho, Nu_drho,  nqmax0, nqmax, &
+    ! nu_int_kernel, nu_q
+    ! EFTCAMB MOD END.
+
     contains
     !cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+
+    ! EFTCAMB MOD START: compatibility with massive neutrinos
+    subroutine sum_mnu_for_m1(summnu,dsummnu, m1, targ, sgn)
+        use constants
+        real(dl), intent(in) :: m1, targ, sgn
+        real(dl), intent(out) :: summnu, dsummnu
+        real(dl) :: m2,m3
+
+        m2 = sqrt(m1**2 + delta_mnu21)
+        m3 = sqrt(m1**2 + sgn*delta_mnu31)
+        summnu = m1 + m2 + m3 - targ
+        dsummnu = m1/m2+m1/m3 + 1
+
+    end subroutine sum_mnu_for_m1
+    ! EFTCAMB MOD END.
 
     subroutine Nu_init
 
@@ -1614,14 +1735,34 @@
     !  then m = Omega_nu/N_nu rho_crit /n
     !  Error due to velocity < 1e-5
 
+        ! EFTCAMB MOD START: initialize the massive neutrino's wrapper
+        if ( associated( CP%eft_par_cache%Nu_background    ) ) nullify( CP%eft_par_cache%Nu_background )
+        if ( associated( CP%eft_par_cache%Nu_rho           ) ) nullify( CP%eft_par_cache%Nu_rho        )
+        if ( associated( CP%eft_par_cache%Nu_drho          ) ) nullify( CP%eft_par_cache%Nu_drho       )
+        if ( associated( CP%eft_par_cache%Nu_pidot         ) ) nullify( CP%eft_par_cache%Nu_pidot      )
+        if ( associated( CP%eft_par_cache%Nu_pidotdot      ) ) nullify( CP%eft_par_cache%Nu_pidotdot   )
+        if ( associated( CP%eft_par_cache%Nu_pidotdotdot   ) ) nullify( CP%eft_par_cache%Nu_pidotdotdot   )
+
+        CP%eft_par_cache%Nu_background  => Nu_background
+        CP%eft_par_cache%Nu_rho         => Nu_rho
+        CP%eft_par_cache%Nu_drho        => Nu_drho
+        CP%eft_par_cache%Nu_pidot       => Nu_pidot
+        CP%eft_par_cache%Nu_pidotdot    => Nu_pidotdot
+        CP%eft_par_cache%Nu_pidotdotdot => Nu_pidotdotdot
+        ! EFTCAMB MOD END.
+
     do i=1, CP%Nu_mass_eigenstates
         nu_masses(i)=const/(1.5d0*zeta3)*grhom/grhor*CP%omegan*CP%Nu_mass_fractions(i) &
             /CP%Nu_mass_degeneracies(i)
     end do
 
     if (allocated(r1)) return
-    allocate(r1(nrhopn),p1(nrhopn),dr1(nrhopn),dp1(nrhopn),ddr1(nrhopn))
 
+    ! EFTCAMB MOD START: compatibility with massive neutrinos
+        allocate(r1(nrhopn),p1(nrhopn),dr1(nrhopn),dp1(nrhopn),ddr1(nrhopn),ddp1(nrhopn),dddp1(nrhopn),ddddp1(nrhopn))
+        ! Original code:
+        ! allocate(r1(nrhopn),p1(nrhopn),dr1(nrhopn),dp1(nrhopn),ddr1(nrhopn))
+        ! EFTCAMB MOD END.
 
     nqmax=3
     if (AccuracyBoost >1) nqmax=4
@@ -1677,6 +1818,11 @@
     call splder(p1,dp1,nrhopn,spline_data)
     call splder(dr1,ddr1,nrhopn,spline_data)
 
+    ! EFTCAMB MOD START: compatibility with massive neutrinos
+    call splder(dp1,ddp1,nrhopn,spline_data)
+    call splder(ddp1,dddp1,nrhopn,spline_data)
+    call splder(dddp1,ddddp1,nrhopn,spline_data)
+    ! EFTCAMB MOD END.
 
     end subroutine Nu_init
 
@@ -1817,6 +1963,94 @@
     end if
 
     end function Nu_drho
+
+    ! EFTCAMB MOD START: compatibility with massive neutrinos
+    function Nu_pidot(am,adotoa,presnu) result (presnudot)
+        use precision
+        use ModelParams
+
+        real(dl) adotoa,presnu,presnudot
+        real(dl) d
+        real(dl), intent(IN) :: am
+        integer i
+
+        if (am< am_minp) then
+            presnudot = -2*const2*am**2*adotoa/3._dl
+        else if (am>am_maxp) then
+            presnudot = -((15._dl*(4._dl*am**2*zeta5 -189._dl*Zeta7))/(8._dl*am**3*const))*adotoa
+        else
+            d=log(am/am_min)/dlnam+1._dl
+            i=int(d)
+            d=d-i
+
+            presnudot = dp1(i)+d*(ddp1(i)+d*(3._dl*(dp1(i+1)-dp1(i))-2._dl*ddp1(i) &
+                -ddp1(i+1)+d*(ddp1(i)+ddp1(i+1)+2._dl*(dp1(i)-dp1(i+1)))))
+
+            presnudot=presnu*adotoa*presnudot/dlnam
+        end if
+
+    end function Nu_pidot
+
+    function Nu_pidotdot(am,adotoa,Hdot,presnu,presnudot) result (presnudotdot)
+        use precision
+        use ModelParams
+
+        real(dl) adotoa,Hdot,presnu,presnudot,presnudotdot
+        real(dl) d
+        real(dl), intent(in) :: am
+        integer i
+
+        if (am< am_minp) then
+            presnudotdot = presnudot*(adotoa +Hdot/adotoa) +am**2*adotoa**2*(-2._dl*const2/3._dl)
+        else if (am>am_maxp) then
+            presnudotdot = presnudot*(adotoa +Hdot/adotoa) +am**2*adotoa**2*(&
+                &-((15._dl*zeta5)/(am**3*const)) + (15._dl*(4._dl*am**2*zeta5 -189._dl*Zeta7))/(2._dl*am**5*const))
+        else
+
+            d=log(am/am_min)/dlnam+1._dl
+            i=int(d)
+            d=d-i
+
+            presnudotdot = ddp1(i)+d*(dddp1(i)+d*(3._dl*(ddp1(i+1)-ddp1(i))-2._dl*dddp1(i) &
+                -dddp1(i+1)+d*(dddp1(i)+dddp1(i+1)+2._dl*(ddp1(i)-ddp1(i+1)))))
+
+            presnudotdot = +adotoa**2*presnu*presnudotdot/dlnam +Hdot/adotoa*presnudot +presnudot**2/presnu
+        end if
+
+    end function Nu_pidotdot
+
+    function Nu_pidotdotdot(am,adotoa,Hdot,Hdotdot,presnu,presnudot,presnudotdot) result (presnudotdotdot)
+        use precision
+        use ModelParams
+
+        real(dl) adotoa,Hdot,Hdotdot,presnu,presnudot,presnudotdot,presnudotdotdot
+        real(dl) d
+        real(dl), intent(in) :: am
+        integer i
+
+        if (am< am_minp) then
+            presnudotdotdot = presnudotdot*( adotoa+Hdot/adotoa )+presnudot*( Hdot+ Hdotdot/adotoa -( Hdot/adotoa )**2 )&
+                &-4._dl/3._dl*const2*( adotoa*Hdot +adotoa**3 )*am**2
+        else if (am>am_maxp) then
+            presnudotdotdot = presnudotdot*( adotoa+Hdot/adotoa )+presnudot*( Hdot+ Hdotdot/adotoa -( Hdot/adotoa )**2 )&
+                & +30._dl*adotoa*Hdot*( zeta5/const/am -189._dl/2._dl*zeta7/const/am**3 )&
+                & +15._dl*adotoa**3*( -zeta5/const/am +1.5_dl*189._dl*zeta7/const/am**3 )
+        else
+
+            d=log(am/am_min)/dlnam+1._dl
+            i=int(d)
+            d=d-i
+
+            presnudotdotdot = dddp1(i)+d*(ddddp1(i)+d*(3._dl*(dddp1(i+1)-dddp1(i))-2._dl*ddddp1(i) &
+                -ddddp1(i+1)+d*(ddddp1(i)+ddddp1(i+1)+2._dl*(dddp1(i)-dddp1(i+1)))))
+
+            presnudotdotdot = presnu*adotoa**4*presnudotdotdot/dlnam +3._dl*( presnudotdot*Hdot +presnudot*presnudotdot*adotoa/presnu &
+                &-presnudot**2*Hdot/presnu -presnudot*Hdot**3/adotoa ) -2._dl*presnudot**3/presnu*adotoa +presnu*Hdotdot
+
+        end if
+
+    end function Nu_pidotdotdot
+    ! EFTCAMB MOD END.
 
     end module MassiveNu
 
@@ -3254,6 +3488,17 @@
         a=a0+adot0*dtau
         scaleFactor(i)=a
         a2=a*a
+
+        ! EFTCAMB MOD START: protection against models that do not have radiation domination
+        if ( isnan(a) ) then
+            if ( FeedbackLevel > 2 ) then
+                print*, 'inithermo failed: dtauda is NaN. The model considered has either a bug in the expansion history or does not have radiation domination'
+                print*, 'tau minimum:', tauminn, '; initial time:', adotrad*tauminn, '; tau0:', CP%tau0
+            end if
+            call GlobalError('inithermo: failed, dtauda is NaN. The model considered has either a bug in the expansion history or does not have radiation domination',error_reionization)
+            return
+        end if
+        ! EFTCAMB MOD END.
 
         adot=1/dtauda(a)
 

@@ -116,7 +116,12 @@
 
     integer :: l_smooth_sample = 3000 !assume transfer functions effectively small for k>2*l_smooth_sample
 
+#ifndef fixq
     real(dl) :: fixq = 0._dl !Debug output of one q
+#endif
+#ifndef fixq_array
+    real(dl), parameter, dimension(1) :: fixq_array = [ 0._dl ]
+#endif
 
     real(dl) :: ALens = 1._dl
 
@@ -132,6 +137,12 @@
     type(EvolutionVars) EV
     !     Timing variables for testing purposes. Used if DebugMsgs=.true. in ModelParams
     real(sp) actual,timeprev,starttime
+
+    ! EFTCAMB MOD START: some quantities:
+    real(dl) :: k_start, k_end
+    integer  :: i
+    real(dl), dimension(:), allocatable :: temp_fixq_array
+    ! EFTCAMB MOD END.
 
     WantLateTime =  CP%DoLensing .or. num_redshiftwindows > 0
 
@@ -176,10 +187,39 @@
 
     if (CP%WantCls) call SetkValuesForSources
 
+    ! EFTCAMB MOD START: fix k array if wanted:
+    if ( DebugEFTCAMB ) then
+        if ( fixq==0._dl .and. any( fixq_array /= 0._dl ) ) then
+            ! allocate the q array:
+            allocate( temp_fixq_array, source=fixq_array )
+            ! reset q values:
+            call Ranges_Init( Evolve_q )
+            ! loop over fixq array:
+            do i=1, size( temp_fixq_array )-1
+                k_start = temp_fixq_array(i)
+                k_end   = temp_fixq_array(i+1)
+                call Ranges_Add( Evolve_q, k_start, k_end, nstep=1, IsLog=.False.)
+            end do
+            call Ranges_GetArray( Evolve_q, .false. )
+            ! some feedback:
+            write(*,*) 'EFTCAMB printing evolution of scalar variables at k:'
+            call Ranges_Write( Evolve_q )
+        end if
+    end if
+    ! EFTCAMB MOD END.
+
     if (CP%WantTransfer) call InitTransfer
 
     !***note that !$ is the prefix for conditional multi-processor compilation***
     !$ if (ThreadNum /=0) call OMP_SET_NUM_THREADS(ThreadNum)
+
+    ! EFTCAMB MOD START: open files for EFTCAMB debug structure
+    if ( DebugEFTCAMB ) then
+        if (CP%WantScalars) then
+            call EV%eft_cache%open_cache_files( CP%EFTCAMB%outroot )
+        end if
+    end if
+    ! EFTCAMB MOD END.
 
     if (CP%WantCls) then
         if (DebugMsgs .and. Feedbacklevel > 0) write(*,*) 'Set ',Evolve_q%npoints,' source k values'
@@ -210,6 +250,15 @@
         end if
 
     endif !WantCls
+
+    ! EFTCAMB MOD START: close files for EFTCAMB debug structure
+    if ( DebugEFTCAMB ) then
+        if (CP%WantScalars) then
+           call EV%eft_cache%close_cache_files( )
+        end if
+        if ( .not. all( fixq_array .eq. 0._dl ) ) stop
+    end if
+    ! EFTCAMB MOD END.
 
     ! If transfer functions are requested, set remaining k values and output
     if (CP%WantTransfer .and. global_error_flag==0) then
@@ -985,23 +1034,33 @@
     tau=taustart
     ind=1
 
-    !!Example code for plotting out variable evolution
     if (fixq/=0._dl) then
+
+        ! EFTCAMB MOD START: debug one k mode
+        if ( DebugEFTCAMB ) then
+            write(*,*) 'EFTCAMB printing evolution of scalar variables at k=', fixq
+        end if
+
         tol1=tol/exp(AccuracyBoost-1)
-        call CreateTxtFile('evolve_q005.txt',1)
-        do j=1,1000
-            tauend = taustart+(j-1)*(CP%tau0-taustart)/1000
+        !do j=1,1000
+        do j=2,TimeSteps%npoints
+
+            !tauend = taustart +REAL(j-1)*(CP%tau0-taustart)/REAL(10000-1)
+            tauend=TimeSteps%points(j)
+
             call GaugeInterface_EvolveScal(EV,tau,y,tauend,tol1,ind,c,w)
-            yprime = 0
-            call derivs(EV,EV%ScalEqsToPropagate,tau,y,yprime)
-            adotoa = 1/(y(1)*dtauda(y(1)))
-            ddelta= (yprime(3)*grhoc+yprime(4)*grhob)/(grhob+grhoc)
-            delta=(grhoc*y(3)+grhob*y(4))/(grhob+grhoc)
-            growth= ddelta/delta/adotoa
-            write (1,'(7E15.5)') tau, delta, growth, y(3), y(4), y(EV%g_ix), y(1)
+
+            call output(EV,y,j,tau,sources)
+
         end do
-        close(1)
+
+        if ( DebugEFTCAMB ) then
+            call EV%eft_cache%close_cache_files( )
+        end if
+        ! EFTCAMB MOD END.
+
         stop
+
     end if
 
     !     Begin timestep loop.
@@ -1167,7 +1226,16 @@
     real(dl) atol
 
     atol=tol/exp(AccuracyBoost-1)
-    if (CP%Transfer%high_precision) atol=atol/10000
+
+    ! EFTCAMB MOD START: this seems to create some problems. It should be safe to turn it off.
+    if (CP%EFTCAMB%EFTflag/=0) then
+        if (CP%Transfer%high_precision) atol=atol
+    else
+        if (CP%Transfer%high_precision) atol=atol/10000
+    end if
+    ! Original code:
+    ! if (CP%Transfer%high_precision) atol=atol/10000
+    ! EFTCAMB MOD END.
 
     ind=1
     call initial(EV,y, tau)
