@@ -127,7 +127,7 @@
 
     Type(ClTransferData), pointer :: ThisCT
 
-    public cmbmain, ALens, ClTransferToCl, InitVars !InitVars for BAO hack
+    public cmbmain, ALens, ClTransferToCl, InitVars, GetTauStart !InitVars for BAO hack
 
     contains
 
